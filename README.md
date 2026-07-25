@@ -1,5 +1,10 @@
 # JPL Horizons Navigator
 
+<p align="center">
+  <img src="logo.png" alt="Horizons orbit navigator" width="168" />
+</p>
+
+
 3D orbit visualization tool for NASA/JPL's Horizons ephemeris system.
 
 ## Install (Ubuntu 24.04)
