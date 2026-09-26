@@ -16,10 +16,13 @@ The single test that talks to JPL is opt-in:
     HORIZONS_LIVE=1 python3 -m unittest test_horizons_ui -v
 """
 
+import csv
 import os
+import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import tkinter as tk
 
@@ -34,6 +37,12 @@ from horizons_ui import HorizonsAPI, HorizonsUI
 LABELLED = """\
 *******************************************************************************
 Ephemeris / API_USER ...
+*******************************************************************************
+Target body name: Mars (499)                      {source: mar099}
+Center body name: Sun (10)                        {source: DE441}
+Start time      : A.D. 2026-Sep-26 00:00:00.0000 TDB
+Stop  time      : A.D. 2026-Oct-01 00:00:00.0000 TDB
+Step-size       : 7200 minutes
 *******************************************************************************
 $$SOE
 2461309.500000000 = A.D. 2026-Sep-26 00:00:00.0000 TDB
@@ -54,30 +63,13 @@ $$SOE
 $$EOE
 """
 
-# A trimmed OBSERVER reply in the CSV layout used for link timing.
-LINK_CSV = """\
-***********************************************************************************************
- Date__(UT)__HR:MN, , ,            delta,     deldot,  1-way_down_LT,       VmagSn,     VmagOb,
-***********************************************************************************************
+# A comma-formatted data block, as CSV_FORMAT=YES produces.
+CSV_BLOCK = """\
+ Date__(UT)__HR:MN, , ,            delta,     deldot,  1-way_down_LT,
 $$SOE
- 2026-Sep-26 00:00, , , 1.69933032252892,-11.4546799,    14.13289934,   29.6901475, 32.5118381,
- 2026-Sep-28 00:00, , , 1.68600676490452,-11.6126242,   14.02209069,   29.7071702, 32.1666973,
-$$EOE
-***********************************************************************************************
-"""
-
-# The same row with the columns shuffled, to prove the positions come from
-# the header rather than from a hard-coded layout.
-LINK_CSV_REORDERED = """\
- Date__(UT)__HR:MN,     deldot,       VmagSn,  1-way_down_LT,            delta,     VmagOb,
-$$SOE
- 2026-Sep-26 00:00,-11.4546799,   29.6901475,    14.13289934, 1.69933032252892, 32.5118381,
+ 2026-Sep-26 00:00, , , 1.69933032252892,-11.4546799,    14.13289934,
 $$EOE
 """
-
-# Constants Horizons itself reports in the reply header.
-AU_KM = 149597870.700
-C_KMS = 299792.458
 
 
 class TestVectorParsing(unittest.TestCase):
@@ -195,30 +187,57 @@ class TestValidation(unittest.TestCase):
             {"COMMAND": "Apophis;", "CENTER": "500@10", "MAKE_EPHEM": "NO"}))
 
 
-class TestLinkTiming(unittest.TestCase):
-    def test_rows_are_parsed(self):
-        rows = HorizonsUI._parse_link_times(LINK_CSV)
-        self.assertEqual(len(rows), 2)
-        date, range_au, light_min = rows[0]
-        self.assertEqual(date, "2026-Sep-26 00:00")
-        self.assertAlmostEqual(range_au, 1.69933032252892)
-        self.assertAlmostEqual(light_min, 14.13289934)
+class TestReplySummary(unittest.TestCase):
+    def test_header_fields_are_extracted(self):
+        joined = "\n".join(HorizonsUI._summarize_reply(LABELLED))
+        self.assertIn("Target  : Mars (499)", joined)
+        self.assertIn("Center  : Sun (10)", joined)
+        self.assertIn("Start   : A.D. 2026-Sep-26", joined)
+        self.assertIn("Stop    : A.D. 2026-Oct-01", joined)
+        self.assertIn("Step    : 7200 minutes", joined)
 
-    def test_light_time_equals_range_over_c(self):
-        """The reported light time must be range / c - a real physics check."""
-        for _, range_au, light_min in HorizonsUI._parse_link_times(LINK_CSV):
-            expected = range_au * AU_KM / C_KMS / 60.0
-            self.assertAlmostEqual(light_min, expected, delta=0.001)
+    def test_sample_count_counts_timestamps_not_printed_lines(self):
+        """Regression: 2 timestamps must not be counted as 6 printed rows.
 
-    def test_columns_are_found_by_header_not_position(self):
-        rows = HorizonsUI._parse_link_times(LINK_CSV_REORDERED)
+        A labelled VECTORS sample spans a date row, a position row and a
+        velocity row, so counting lines over-reports by 3x.
+        """
+        self.assertIn("Samples : 2", HorizonsUI._summarize_reply(LABELLED))
+        self.assertEqual(len(HorizonsUI._parse_vectors(LABELLED)[0]), 2)
+
+    def test_whitespace_in_values_is_collapsed(self):
+        joined = "\n".join(HorizonsUI._summarize_reply(LABELLED))
+        self.assertIn("Mars (499) {source: mar099}", joined)
+
+    def test_plain_text_has_no_summary(self):
+        self.assertIsNone(HorizonsUI._summarize_reply("nothing to see here"))
+
+
+class TestCsvRows(unittest.TestCase):
+    def test_labelled_vectors_become_position_rows(self):
+        rows = HorizonsUI._csv_rows(LABELLED)
+        self.assertEqual(rows[0], ["x_au", "y_au", "z_au", "distance_au"])
+        self.assertEqual(len(rows), 3)  # header + 2 timestamps
+
+    def test_distance_column_is_consistent(self):
+        for x, y, z, distance in HorizonsUI._csv_rows(LABELLED)[1:]:
+            expected = (float(x) ** 2 + float(y) ** 2 + float(z) ** 2) ** 0.5
+            self.assertAlmostEqual(float(distance), expected, places=9)
+
+    def test_velocity_rows_are_not_exported_as_positions(self):
+        rows = HorizonsUI._csv_rows(LABELLED)
+        self.assertEqual(len(rows), 3)
+        self.assertNotAlmostEqual(float(rows[1][0]), -1.335339041450438E-02)
+
+    def test_comma_reply_passes_through(self):
+        rows = HorizonsUI._csv_rows(CSV_BLOCK)
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0][1], 1.69933032252892)   # delta
-        self.assertAlmostEqual(rows[0][2], 14.13289934)        # 1-way_down_LT
+        self.assertEqual(rows[0][0].strip(), "2026-Sep-26 00:00")
+        self.assertEqual(rows[0][3].strip(), "1.69933032252892")
 
-    def test_reply_without_link_columns(self):
-        self.assertIsNone(HorizonsUI._parse_link_times("no header here"))
-        self.assertIsNone(HorizonsUI._parse_link_times(LABELLED))
+    def test_no_block(self):
+        self.assertIsNone(HorizonsUI._csv_rows("prose only"))
+        self.assertIsNone(HorizonsUI._csv_rows(""))
 
 
 class TestApplication(unittest.TestCase):
@@ -295,25 +314,56 @@ class TestApplication(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(seen.get("thread"), threading.main_thread())
 
-    def test_link_tab_and_chart(self):
-        tabs = [self.app.view_tabs.tab(i, "text")
-                for i in range(self.app.view_tabs.index("end"))]
-        self.assertEqual(tabs, ["3D Orbit", "DTN Link Timing"])
-
-    def test_link_summary_renders_and_charts(self):
-        self.app._show_link_summary("Earth", "Mars", {"result": LINK_CSV})
+    def test_display_result_puts_summary_above_raw_text(self):
+        self.app._display_result({"result": LABELLED})
         text = self.app.output_text.get(1.0, tk.END)
-        self.assertIn("DTN link timing: Earth <-> Mars", text)
-        self.assertIn("One-way light time", text)
-        self.assertIn("2026-Sep-26 00:00", text)
-        self.assertEqual(self.app.view_tabs.select(), str(self.app.link_tab))
-        self.assertEqual(len(self.app.link_plotter.ax.get_lines()), 1)
-        self.assertIn("Earth <-> Mars", self.app.link_plotter.ax.get_title())
+        self.assertIn("Target  : Mars (499)", text)
+        self.assertIn("Samples : 2", text)
+        self.assertIn("$$SOE", text)
+        self.assertLess(text.index("Target  :"), text.index("$$SOE"))
+        self.assertEqual(self.app.raw_reply, LABELLED)
 
-    def test_link_summary_handles_a_reply_without_timing(self):
-        self.app._show_link_summary("Earth", "Mars", {"result": "nope"})
-        self.assertEqual(self.app.status_var.get(),
-                         "No range/light-time columns in the reply")
+    def test_quantity_picker_appends_and_switches_to_observer(self):
+        self.app.quantities_entry_var.set("1")
+        self.app.ephem_type_var.set("VECTORS")
+        self.app.quantity_picker.set("9  Visual mag. & Surf Brt")
+        self.app._on_quantity_pick()
+        self.assertEqual(self.app.quantities_entry_var.get(), "1,9")
+        self.assertEqual(self.app.ephem_type_var.get(), "OBSERVER")
+
+    def test_quantity_picker_does_not_duplicate(self):
+        self.app.quantities_entry_var.set("1")
+        self.app.quantity_picker.set("1  Astrometric RA & DEC")
+        self.app._on_quantity_pick()
+        self.app._on_quantity_pick()
+        self.assertEqual(self.app.quantities_entry_var.get(), "1")
+
+    def test_save_as_csv_writes_real_csv(self):
+        self.app._display_result({"result": LABELLED})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "orbit.csv")
+            with mock.patch.object(horizons_ui.filedialog, "asksaveasfilename",
+                                   return_value=path):
+                self.app._save_results()
+            self.assertTrue(os.path.exists(path))
+            with open(path, newline="") as handle:
+                rows = list(csv.reader(handle))
+        self.assertEqual(rows[0], ["x_au", "y_au", "z_au", "distance_au"])
+        self.assertEqual(len(rows), 3)
+
+    def test_save_as_csv_falls_back_to_text_when_not_tabular(self):
+        self.app._display_result({"result": "prose with no data block"})
+        warned = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "note.csv")
+            with mock.patch.object(horizons_ui.filedialog, "asksaveasfilename",
+                                   return_value=path), \
+                 mock.patch.object(horizons_ui.messagebox, "showwarning",
+                                   side_effect=lambda *a, **k: warned.append(a)):
+                self.app._save_results()
+            self.assertTrue(os.path.exists(path))
+        self.assertEqual(len(warned), 1)
+        self.assertIn("Saved", self.app.status_var.get())
 
 
 @unittest.skipUnless(os.environ.get("HORIZONS_LIVE") == "1",
@@ -332,23 +382,6 @@ class TestLiveAPI(unittest.TestCase):
         distance = np.sqrt(x ** 2 + y ** 2 + z ** 2)
         self.assertTrue(1.3 < float(np.mean(distance)) < 1.8,
                         f"Mars mean heliocentric distance {np.mean(distance):.3f} AU")
-
-    def test_earth_mars_light_time_round_trip(self):
-        api = HorizonsAPI()
-        result = api.query({
-            "COMMAND": "399", "CENTER": "500@499",
-            "START_TIME": "2026-09-26", "STOP_TIME": "2026-12-26",
-            "STEP_SIZE": "10 d", "EPHEM_TYPE": "OBSERVER",
-            "QUANTITIES": "20,21,22", "CSV_FORMAT": "YES",
-            "OBJ_DATA": "NO", "MAKE_EPHEM": "YES"})
-        rows = HorizonsUI._parse_link_times(result["result"])
-        self.assertGreater(len(rows), 5)
-        for _, range_au, light_min in rows:
-            self.assertAlmostEqual(light_min, range_au * AU_KM / C_KMS / 60.0,
-                                   delta=0.01)
-        mean = float(np.mean([row[2] for row in rows]))
-        self.assertTrue(3.0 < mean < 25.0,
-                        f"Earth-Mars mean light time {mean:.2f} min")
 
 
 if __name__ == "__main__":

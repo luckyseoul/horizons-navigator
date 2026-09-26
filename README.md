@@ -5,7 +5,10 @@
 </p>
 
 
-3D orbit visualization and DTN link timing for NASA/JPL's Horizons ephemeris system.
+Ephemeris viewer and 3D orbit visualiser for NASA/JPL's Horizons system.
+
+Query any body or designation, plot its trajectory in three dimensions, and
+read the reply without wading through Horizons' raw fixed-width text.
 
 ## Install (Ubuntu 24.04)
 ```bash
@@ -21,8 +24,9 @@ python3 horizons_ui.py
 - **Preset Bodies** - Planets, moons, barycenters
 - **Custom Queries** - Asteroids, comets by designation
 - **Reference Orbits** - Mercury/Venus/Earth/Mars shown for scale
-- **DTN Link Timing** - Expected bundle travel time between any two nodes
-  across your query window
+- **Observer Quantities** - Pick Horizons' quantity codes by name
+- **Reply Summary** - Target, center, time span, step and sample count up front
+- **CSV Export** - Save the data block as real CSV, not a text dump
 
 ## Usage
 
@@ -36,36 +40,17 @@ The 3D view draws the Sun and the planetary reference rings only when the
 plot origin really is the Sun or the solar-system barycenter. Geocentric,
 planet-centred and observatory-centred queries are plotted on their own.
 
-## DTN link timing
+Every reply opens with a summary — target, center, time span, step size and
+sample count — above the raw Horizons text.
 
-The **DTN Link Timing** tab answers the question a contact plan asks first:
-how long is the propagation floor on this link, and how does it move?
+**Quantities** apply only to OBSERVER ephemerides. The dropdown beside the
+field lists Horizons' quantity codes by name; picking one appends its code
+and selects the OBSERVER type for you.
 
-Pick **Node A** and **Node B**, then click *Bundle Travel Time*. The query
-reuses the Start / Stop / Step fields above. Horizons returns the range and
-the one-way down-leg light time between the two nodes, and the tool charts
-the light time across the window with the best and worst samples marked.
-
-```
-DTN link timing: Earth <-> Mars
-
-Window             : 2026-Sep-26 00:00 to 2027-Sep-26 00:00  (74 samples)
-One-way light time : 5.64 min best / 10.65 min mean / 17.09 min worst
-Round-trip time    : 11.28 to 34.18 min
-Range              : 0.678 to 2.055 AU
-
-Shortest travel time : 2027-Feb-18 00:00 at 5.64 min (0.678 AU)
-Longest travel time  : 2027-Sep-26 00:00 at 17.09 min (2.055 AU)
-```
-
-One-way light time is the propagation floor for a bundle on that link. It is
-not the whole delivery time: store-and-forward hops, queuing, retransmission
-and custody overhead all add to it. What this gives you is the physics term
-that a contact plan, a timer margin or an RTT estimate has to start from.
-
-The chart is a sanity check as much as a readout — the Earth-Mars curve
-bottoms out at opposition and peaks near conjunction, which is what makes a
-launch window worth waiting for.
+**Save** writes the displayed text. Give the file a `.csv` extension and it
+writes the data block as real CSV instead — for a VECTORS reply that is one
+`x_au, y_au, z_au, distance_au` row per timestamp. Replies with no data
+block fall back to text with a warning.
 
 ## Tests
 
