@@ -11,10 +11,21 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import urllib.request
 import urllib.parse
 import json
+import queue
 import re
-import math
-from datetime import datetime, timedelta
+import traceback
+from datetime import datetime, timedelta, timezone
 from threading import Thread
+
+# Horizons VECTORS replies carry one position row and one velocity row per
+# timestamp.  Anchoring the pattern to the start of the line is what stops the
+# VX=/VY=/VZ= velocity row from being read as a second position.
+_VEC_NUMBER = r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[Ee][-+]?\d+)?)'
+_POSITION_ROW = re.compile(
+    r'^X\s*=\s*' + _VEC_NUMBER +
+    r'\s+Y\s*=\s*' + _VEC_NUMBER +
+    r'\s+Z\s*=\s*' + _VEC_NUMBER
+)
 
 # Matplotlib imports for 3D plotting
 import matplotlib
@@ -150,16 +161,38 @@ class HorizonsAPI:
         "Madrid DSN": "-55",
     }
     
+    # CENTER codes whose origin is the Sun or the solar-system barycenter,
+    # mapped to the label used in the plot title.
+    SOLAR_CENTERS = {
+        "500@10": "Heliocentric",
+        "10": "Heliocentric",
+        "500@0": "Barycentric",
+        "0": "Barycentric",
+    }
+
+    @classmethod
+    def center_origin(cls, center_code: str):
+        """Classify a CENTER value by what sits at the plot origin.
+
+        Returns "Heliocentric", "Barycentric", or None for every other
+        center.  Geocentric, planet-centred and topocentric observatory
+        codes must not be drawn with the Sun at the origin.
+        """
+        return cls.SOLAR_CENTERS.get(str(center_code or "").strip())
+
     @staticmethod
     def encode_command(cmd: str) -> str:
-        """URL-encode the COMMAND parameter"""
-        cmd = cmd.replace(";", "%3B")
-        cmd = cmd.replace("=", "%3D")
-        return cmd
-    
+        """Percent-encode a COMMAND value for the query string.
+
+        Horizons expects the value URL-encoded, in particular the ';' that
+        terminates a small-body designation and the '=' in DES=/CAP= lookups.
+        """
+        return urllib.parse.quote(str(cmd), safe="")
+
     def query(self, params: dict) -> dict:
         """Execute API query and return results"""
-        
+        params = dict(params)  # never mutate the caller's dict
+
         # Start with format (no quotes on this one)
         query_parts = ["format=json"]
         
@@ -428,6 +461,11 @@ class HorizonsUI:
         
         self.api = HorizonsAPI()
         self.last_vectors = None  # Store last vector query results
+
+        # Worker threads hand finished work back through this queue; Tk calls
+        # are only ever made from the thread that owns the interpreter.
+        self._ui_queue = queue.Queue()
+        self.root.after(50, self._drain_ui_queue)
         
         # Configure grid
         self.root.columnconfigure(0, weight=1)
@@ -459,7 +497,31 @@ class HorizonsUI:
         
         # Set defaults
         self._set_defaults()
-    
+
+    def _post(self, fn):
+        """Schedule *fn* to run on the Tk main thread.
+
+        Worker threads must not touch Tk directly, so they hand callables to
+        this queue and the main thread drains it from an ``after`` poll.
+        """
+        self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self):
+        """Run whatever the worker threads have queued, then reschedule."""
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+        try:
+            self.root.after(50, self._drain_ui_queue)
+        except tk.TclError:
+            pass  # the window has been destroyed
+
     def _init_plot(self):
         """Initialize the 3D plot with reference orbits"""
         # Stop any running animation
@@ -664,7 +726,7 @@ class HorizonsUI:
     
     def _set_defaults(self):
         """Set default values"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self.start_var.set(now.strftime("%Y-%m-%d"))
         self.stop_var.set((now + timedelta(days=365)).strftime("%Y-%m-%d"))
         self.step_var.set("5 d")
@@ -704,12 +766,11 @@ class HorizonsUI:
                     "OBJ_DATA": "YES",
                     "MAKE_EPHEM": "NO"
                 })
-                self.root.after(0, lambda: self._display_result(result))
-                self.root.after(0, lambda: self.status_var.set("Search complete"))
+                self._post(lambda: self._display_result(result))
+                self._post(lambda: self.status_var.set("Search complete"))
             except Exception as e:
-                import traceback
                 error_msg = str(e) if str(e) else traceback.format_exc()
-                self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+                self._post(lambda msg=error_msg: self._show_error(msg))
         
         Thread(target=do_search, daemon=True).start()
     
@@ -742,12 +803,27 @@ class HorizonsUI:
         
         return params
     
+    @staticmethod
+    def _validate_inputs(params: dict):
+        """Return a readable problem with the inputs, or None when they're OK."""
+        if not params.get("COMMAND"):
+            return "Please select or enter a target body."
+        if not params.get("CENTER"):
+            return "Please give a CENTER code, for example 500@10 for the Sun."
+        if params.get("MAKE_EPHEM") == "YES":
+            missing = [key for key in ("START_TIME", "STOP_TIME", "STEP_SIZE")
+                       if not params.get(key)]
+            if missing:
+                return "Please fill in " + ", ".join(missing) + "."
+        return None
+    
     def _execute_query(self):
         """Execute the ephemeris query"""
         params = self._build_params()
         
-        if not params["COMMAND"]:
-            messagebox.showwarning("Input Required", "Please select or enter a target body")
+        problem = self._validate_inputs(params)
+        if problem:
+            messagebox.showwarning("Input Required", problem)
             return
         
         self.status_var.set("Querying Horizons...")
@@ -757,15 +833,14 @@ class HorizonsUI:
         def do_query():
             try:
                 result = self.api.query(params)
-                self.root.after(0, lambda: self._display_result(result))
-                self.root.after(0, lambda: self._plot_result(result, params))
-                self.root.after(0, lambda: self.status_var.set("Query complete"))
+                self._post(lambda: self._display_result(result))
+                self._post(lambda: self._plot_result(result, params))
+                self._post(lambda: self.status_var.set("Query complete"))
             except Exception as e:
-                import traceback
                 error_msg = str(e) if str(e) else traceback.format_exc()
-                self.root.after(0, lambda msg=error_msg: self._show_error(msg))
+                self._post(lambda msg=error_msg: self._show_error(msg))
             finally:
-                self.root.after(0, lambda: self.query_btn.state(["!disabled"]))
+                self._post(lambda: self.query_btn.state(["!disabled"]))
         
         Thread(target=do_query, daemon=True).start()
     
@@ -782,40 +857,70 @@ class HorizonsUI:
         else:
             self.output_text.insert(tk.END, json.dumps(result, indent=2))
     
-    def _parse_vectors(self, result_text: str):
-        """Parse vector ephemeris data from result text"""
-        x_vals, y_vals, z_vals = [], [], []
-        
-        # Find data between $$SOE and $$EOE
+    @staticmethod
+    def _parse_vectors(result_text: str):
+        """Extract X/Y/Z position vectors from a Horizons reply.
+
+        Handles the default labelled layout::
+
+            X = 1.94E-01 Y = 1.53E+00 Z = 2.75E-02
+            VX=-1.33E-02 VY= 2.93E-03 VZ= 3.89E-04
+
+        and the ``CSV_FORMAT=YES`` layout::
+
+            2461309.5, A.D. 2026-Sep-26 00:00:00.0000, 1.94E-01, 1.53E+00, 2.75E-02,
+
+        Position rows are anchored to the start of the line, so the velocity
+        row that follows each state vector is never mistaken for a position.
+        Returns ``(x, y, z)`` numpy arrays, or ``None`` when the block holds
+        no usable vectors.
+        """
         match = re.search(r'\$\$SOE\s*(.*?)\s*\$\$EOE', result_text, re.DOTALL)
         if not match:
             return None
-        
-        data_block = match.group(1)
-        lines = data_block.strip().split('\n')
-        
-        for line in lines:
+
+        x_vals, y_vals, z_vals = [], [], []
+
+        for line in match.group(1).splitlines():
             line = line.strip()
             if not line or line.startswith('*'):
                 continue
-            
-            # Try to extract X, Y, Z values
-            # Format varies, but typically: date X= val Y= val Z= val
-            x_match = re.search(r'X\s*=\s*([+-]?\d+\.?\d*E?[+-]?\d*)', line, re.IGNORECASE)
-            y_match = re.search(r'Y\s*=\s*([+-]?\d+\.?\d*E?[+-]?\d*)', line, re.IGNORECASE)
-            z_match = re.search(r'Z\s*=\s*([+-]?\d+\.?\d*E?[+-]?\d*)', line, re.IGNORECASE)
-            
-            if x_match and y_match and z_match:
-                try:
-                    x_vals.append(float(x_match.group(1)))
-                    y_vals.append(float(y_match.group(1)))
-                    z_vals.append(float(z_match.group(1)))
-                except ValueError:
-                    continue
-        
+
+            row = _POSITION_ROW.match(line)
+            if row:
+                x_vals.append(float(row.group(1)))
+                y_vals.append(float(row.group(2)))
+                z_vals.append(float(row.group(3)))
+                continue
+
+            if ',' in line:
+                # CSV layout: JDTDB, Calendar Date, X, Y, Z, [VX, VY, VZ,]
+                numbers = []
+                for field in line.split(',')[1:]:
+                    try:
+                        numbers.append(float(field))
+                    except ValueError:
+                        continue  # the calendar-date column
+                if len(numbers) >= 3:
+                    x_vals.extend(numbers[0:1])
+                    y_vals.extend(numbers[1:2])
+                    z_vals.extend(numbers[2:3])
+
         if x_vals:
             return np.array(x_vals), np.array(y_vals), np.array(z_vals)
         return None
+    
+    def _target_label(self) -> str:
+        """Name for whatever the COMMAND entry currently holds.
+
+        The preset combo keeps its last selection even after a custom code is
+        typed, so the command code itself decides the label.
+        """
+        cmd = self.command_var.get().strip().rstrip(";")
+        for name, code in HorizonsAPI.MAJOR_BODIES.items():
+            if cmd == code:
+                return name
+        return cmd or "Target"
     
     def _plot_result(self, result: dict, params: dict):
         """Plot the result if it's vector data"""
@@ -830,7 +935,7 @@ class HorizonsUI:
         
         vectors = self._parse_vectors(result["result"])
         if vectors is None:
-            self.status_var.set("Could not parse vector data")
+            self.status_var.set("No X/Y/Z vectors found in the reply")
             return
         
         x, y, z = vectors
@@ -839,11 +944,11 @@ class HorizonsUI:
         # Clear and replot
         self.plotter.clear()
         
-        # Check if heliocentric
-        center = params.get("CENTER", "")
-        is_heliocentric = "10" in center or "0" in center
+        # The Sun and the planetary reference rings only make sense when the
+        # plot origin really is the Sun or the solar-system barycenter.
+        origin = HorizonsAPI.center_origin(params.get("CENTER", ""))
         
-        if is_heliocentric:
+        if origin:
             self.plotter.plot_sun()
             if self.show_ref_orbits_var.get():
                 # Determine which reference orbits to show based on orbit size
@@ -859,14 +964,16 @@ class HorizonsUI:
                 self.plotter.plot_reference_orbits(planets)
         
         # Get target name
-        target_name = self.preset_var.get() or self.command_var.get()
+        target_name = self._target_label()
         color = HorizonsAPI.PLANET_COLORS.get(target_name, '#00ff00')
         
         self.plotter.plot_orbit(x, y, z, label=target_name, color=color)
         
         title = f"{target_name} Orbit"
-        if is_heliocentric:
-            title += " (Heliocentric)"
+        if origin:
+            title += f" ({origin})"
+        else:
+            title += f" (center {params.get('CENTER', '?')})"
         
         self.plotter.finalize(title)
         
@@ -913,21 +1020,14 @@ class HorizonsUI:
             self.status_var.set("Animation running")
     
     def _stop_animation(self):
-        """Stop animation completely"""
+        """Stop animation completely and leave the static orbit in place.
+
+        The animation never removes the orbit line, so re-plotting it here
+        would only stack a duplicate copy on the axes on every stop.
+        """
         self.plotter.stop_animation()
         self.animate_btn.config(text="▶ Animate")
         self.frame_var.set("")
-        
-        # Replot the static orbit
-        if self.last_vectors is not None:
-            x, y, z = self.last_vectors
-            target_name = self.preset_var.get() or self.command_var.get()
-            color = HorizonsAPI.PLANET_COLORS.get(target_name, '#00ff00')
-            
-            # Just redraw the orbit line
-            self.plotter.plot_orbit(x, y, z, label=target_name, color=color)
-            self.plotter.canvas.draw()
-        
         self.status_var.set("Animation stopped")
     
     def _on_speed_change(self, value):
@@ -948,7 +1048,7 @@ class HorizonsUI:
             filetypes=[("Text files", "*.txt"), ("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if filename:
-            with open(filename, "w") as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 f.write(content)
             self.status_var.set(f"Saved to {filename}")
 
