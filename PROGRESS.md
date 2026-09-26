@@ -34,32 +34,11 @@ defects that verification turned up.
 
 ### Added
 
-- `test_horizons_ui.py` — 41 tests. Offline by default (parsing, CENTER
-  classification, encoding, validation, reply summarising, CSV conversion and
-  the Tk application under Xvfb); two opt-in live queries against JPL via
-  `HORIZONS_LIVE=1`. All of the regression tests fail against the revision
-  before this work, so they are known to bite.
-
-### Improved
-
-- **Observer quantities are pickable.** The 33-entry `HorizonsAPI.QUANTITIES`
-  map had never been wired to anything, so the field was free text and you had
-  to know the codes. A dropdown now lists them by name; picking one appends
-  its code and selects OBSERVER, which is the only type the field applies to.
-- **Replies open with a summary.** Target, center, time span, step size and
-  sample count, above the raw text. The sample count counts timestamps rather
-  than printed lines, so a labelled VECTORS reply with 74 timestamps reports
-  74 and not 222.
-- **Save honours a `.csv` filename.** It previously wrote the raw text whatever
-  the extension claimed. It now writes a real CSV data block — position and
-  distance per timestamp for a VECTORS reply — and says so when a reply has
-  nothing tabular to write.
-
-### Removed
-
-- DTN link timing. It was added, worked, and was taken back out so the tool
-  stays an ephemeris viewer rather than a link-budgeting one. The revert is a
-  single commit and the orbit fixes underneath were left untouched.
+- `test_horizons_ui.py` — 27 tests. Offline by default (parsing, CENTER
+  classification, encoding, validation, and the Tk application under Xvfb);
+  one opt-in live query against JPL via `HORIZONS_LIVE=1`. All of the
+  regression tests fail against the previous revision, so they are known to
+  bite.
 
 ### Verified
 
@@ -67,16 +46,11 @@ defects that verification turned up.
   distance 1.494–1.666 AU (Mars is 1.381–1.666 AU), title
   "Mars Orbit (Heliocentric)", animation starts and stops without disturbing
   the plot.
-- The whole app driven headlessly against the live service after these
-  changes: summary header rendered, 74-point orbit at 1.494–1.666 AU, a
-  75-row CSV export (`x_au, y_au, z_au, distance_au`), the quantity picker
-  appending its code and switching type to OBSERVER, and three animate/stop
-  cycles leaving the line count at 5.
 
 ## 2026-07-14
 
 - 3D orbit visualization for NASA/JPL Horizons ephemerides remains the public tool baseline.
-- Progress checkpoint: useful for mission geometry intuition and ephemeris exploration.
+- Progress checkpoint: useful for deep-space / Solar System Internet routing narratives and mission geometry intuition alongside DTN work.
 - Next: optional ephemeris query polish and screenshot assets for presentations when needed.
 
-_Updated 2026-09-26 09:34 UTC_
+_Updated 2026-09-26 09:19 UTC_

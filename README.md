@@ -5,10 +5,7 @@
 </p>
 
 
-Ephemeris viewer and 3D orbit visualiser for NASA/JPL's Horizons system.
-
-Query any body or designation, plot its trajectory in three dimensions, and
-read the reply without wading through Horizons' raw fixed-width text.
+3D orbit visualization tool for NASA/JPL's Horizons ephemeris system.
 
 ## Install (Ubuntu 24.04)
 ```bash
@@ -24,9 +21,6 @@ python3 horizons_ui.py
 - **Preset Bodies** - Planets, moons, barycenters
 - **Custom Queries** - Asteroids, comets by designation
 - **Reference Orbits** - Mercury/Venus/Earth/Mars shown for scale
-- **Observer Quantities** - Pick Horizons' quantity codes by name
-- **Reply Summary** - Target, center, time span, step and sample count up front
-- **CSV Export** - Save the data block as real CSV, not a text dump
 
 ## Usage
 
@@ -39,18 +33,6 @@ python3 horizons_ui.py
 The 3D view draws the Sun and the planetary reference rings only when the
 plot origin really is the Sun or the solar-system barycenter. Geocentric,
 planet-centred and observatory-centred queries are plotted on their own.
-
-Every reply opens with a summary — target, center, time span, step size and
-sample count — above the raw Horizons text.
-
-**Quantities** apply only to OBSERVER ephemerides. The dropdown beside the
-field lists Horizons' quantity codes by name; picking one appends its code
-and selects the OBSERVER type for you.
-
-**Save** writes the displayed text. Give the file a `.csv` extension and it
-writes the data block as real CSV instead — for a VECTORS reply that is one
-`x_au, y_au, z_au, distance_au` row per timestamp. Replies with no data
-block fall back to text with a warning.
 
 ## Tests
 

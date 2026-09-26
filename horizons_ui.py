@@ -11,7 +11,6 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import urllib.request
 import urllib.parse
 import json
-import csv
 import queue
 import re
 import traceback
@@ -462,7 +461,6 @@ class HorizonsUI:
         
         self.api = HorizonsAPI()
         self.last_vectors = None  # Store last vector query results
-        self.raw_reply = ""        # Last reply text, used for CSV export
 
         # Worker threads hand finished work back through this queue; Tk calls
         # are only ever made from the thread that owns the interpreter.
@@ -627,17 +625,9 @@ class HorizonsUI:
         
         # Quantities (for OBSERVER type)
         ttk.Label(control_frame, text="Quantities:").grid(row=row, column=0, sticky="w")
-        qty_frame = ttk.Frame(control_frame)
-        qty_frame.grid(row=row, column=1, sticky="w", padx=5)
         self.quantities_entry_var = tk.StringVar()
-        ttk.Entry(qty_frame, textvariable=self.quantities_entry_var, width=14).pack(side="left")
-        
-        # The code list is long and unmemorable, so offer it by name.
-        self.quantity_picker = ttk.Combobox(qty_frame, width=24, state="readonly")
-        self.quantity_picker["values"] = [
-            f"{code}  {name}" for code, name in HorizonsAPI.QUANTITIES.items()]
-        self.quantity_picker.pack(side="left", padx=(4, 0))
-        self.quantity_picker.bind("<<ComboboxSelected>>", self._on_quantity_pick)
+        ttk.Entry(control_frame, textvariable=self.quantities_entry_var, width=20).grid(
+            row=row, column=1, sticky="w", padx=5)
         
         # Reference plane
         ttk.Label(control_frame, text="Ref:").grid(row=row, column=2, sticky="w", padx=(10, 0))
@@ -859,57 +849,13 @@ class HorizonsUI:
         self.output_text.delete(1.0, tk.END)
         
         if "error" in result:
-            self.raw_reply = ""
             self.output_text.insert(tk.END, f"ERROR: {result['error']}\n")
             return
         
         if "result" in result:
-            self.raw_reply = result["result"]
-            summary = self._summarize_reply(self.raw_reply)
-            if summary:
-                self.output_text.insert(tk.END, "\n".join(summary) + "\n")
-                self.output_text.insert(tk.END, "-" * 78 + "\n")
-            self.output_text.insert(tk.END, self.raw_reply)
+            self.output_text.insert(tk.END, result["result"])
         else:
-            self.raw_reply = ""
             self.output_text.insert(tk.END, json.dumps(result, indent=2))
-    
-    # Header lines Horizons always emits, paired with the label to show them under.
-    _SUMMARY_FIELDS = (
-        ("Target body name", "Target  "),
-        ("Center body name", "Center  "),
-        ("Start time", "Start   "),
-        ("Stop  time", "Stop    "),
-        ("Step-size", "Step    "),
-    )
-    
-    @classmethod
-    def _summarize_reply(cls, result_text: str):
-        """Build a short readable header for a Horizons reply.
-
-        Returns a list of lines, or None when the reply carries no ephemeris
-        header at all (an object lookup or an error block, say).
-        """
-        summary = []
-        for label, display in cls._SUMMARY_FIELDS:
-            match = re.search(rf'^{re.escape(label)}\s*:\s*(.+?)\s*$',
-                              result_text, re.MULTILINE)
-            if match:
-                value = " ".join(match.group(1).split())
-                summary.append(f"{display}: {value}")
-        
-        block = re.search(r'\$\$SOE\s*(.*?)\s*\$\$EOE', result_text, re.DOTALL)
-        if block:
-            lines = [line.strip() for line in block.group(1).splitlines()
-                     if line.strip()]
-            # Every layout opens a sample with a calendar or Julian date, so
-            # counting those reports timestamps rather than printed lines - a
-            # labelled VECTORS sample spans a date, a position and a velocity
-            # row, which would otherwise count three times.
-            samples = sum(1 for line in lines if line[0].isdigit())
-            summary.append(f"Samples : {samples or len(lines)}")
-        
-        return summary or None
     
     @staticmethod
     def _parse_vectors(result_text: str):
@@ -1090,24 +1036,6 @@ class HorizonsUI:
         self.speed_label.config(text=f"{speed}x")
         self.plotter.set_animation_speed(speed)
     
-    def _on_quantity_pick(self, event=None):
-        """Add the picked observer quantity to the Quantities field.
-
-        Quantities only apply to OBSERVER ephemerides, so picking one also
-        selects that type - otherwise the choice would have no effect.
-        """
-        choice = self.quantity_picker.get()
-        if not choice:
-            return
-        code = choice.split()[0]
-        
-        existing = [c.strip() for c in self.quantities_entry_var.get().split(",")
-                    if c.strip()]
-        if code not in existing:
-            existing.append(code)
-        self.quantities_entry_var.set(",".join(existing))
-        self.ephem_type_var.set("OBSERVER")
-    
     def _save_results(self):
         """Save results to file"""
         content = self.output_text.get(1.0, tk.END)
@@ -1119,59 +1047,10 @@ class HorizonsUI:
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("CSV files", "*.csv"), ("All files", "*.*")]
         )
-        if not filename:
-            return
-        
-        if filename.lower().endswith(".csv"):
-            rows = self._csv_rows(self.raw_reply)
-            if rows is None:
-                messagebox.showwarning(
-                    "Nothing Tabular",
-                    "This reply has no data block that can be written as CSV.\n"
-                    "Saving the displayed text instead.")
-            else:
-                with open(filename, "w", encoding="utf-8", newline="") as f:
-                    csv.writer(f).writerows(rows)
-                self.status_var.set(f"Saved {len(rows)} CSV rows to {filename}")
-                return
-        
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(content)
-        self.status_var.set(f"Saved to {filename}")
-    
-    @staticmethod
-    def _csv_rows(result_text: str):
-        """Turn a reply's data block into rows of fields, or None.
-
-        Comma replies are already tabular.  The labelled VECTORS layout is
-        converted through the vector parser, exposing position only - the
-        velocity rows that sit beside it are dropped, and the column names
-        say so.
-        """
-        if not result_text:
-            return None
-        block = re.search(r'\$\$SOE\s*(.*?)\s*\$\$EOE', result_text, re.DOTALL)
-        if not block:
-            return None
-        
-        lines = [line.strip() for line in block.group(1).splitlines() if line.strip()]
-        if not lines:
-            return None
-        
-        if all(',' in line for line in lines):
-            return [line.rstrip(',').split(',') for line in lines]
-        
-        vectors = HorizonsUI._parse_vectors(result_text)
-        if vectors is not None:
-            x, y, z = vectors
-            rows = [["x_au", "y_au", "z_au", "distance_au"]]
-            for xi, yi, zi in zip(x, y, z):
-                distance = float(np.sqrt(xi ** 2 + yi ** 2 + zi ** 2))
-                rows.append([f"{xi:.12g}", f"{yi:.12g}", f"{zi:.12g}",
-                             f"{distance:.12g}"])
-            return rows
-        
-        return None
+        if filename:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.status_var.set(f"Saved to {filename}")
 
 
 def main():
