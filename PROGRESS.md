@@ -3,7 +3,8 @@
 ## 2026-09-26
 
 Verified the tool end-to-end against the live JPL service, then fixed the
-defects that verification turned up.
+defects that verification turned up. The DTN framing turned out to be
+buildable rather than aspirational, so it now carries a real tool.
 
 ### Found and fixed
 
@@ -34,11 +35,17 @@ defects that verification turned up.
 
 ### Added
 
-- `test_horizons_ui.py` — 27 tests. Offline by default (parsing, CENTER
-  classification, encoding, validation, and the Tk application under Xvfb);
-  one opt-in live query against JPL via `HORIZONS_LIVE=1`. All of the
-  regression tests fail against the previous revision, so they are known to
-  bite.
+- **DTN link timing.** A second tab computing expected bundle travel time
+  between two nodes. It asks Horizons for the range and the one-way down-leg
+  light time (`QUANTITIES=20,21,22`, CSV), charts light time across the query
+  window with the best and worst samples marked, and reports round-trip time
+  and range. Columns are located by CSV header name, so the parse does not
+  depend on the order the quantities were requested in.
+- `test_horizons_ui.py` — 35 tests. Offline by default (parsing, CENTER
+  classification, encoding, validation, link timing, and the Tk application
+  under Xvfb); two opt-in live queries against JPL via `HORIZONS_LIVE=1`. All
+  of the regression tests fail against the previous revision, so they are
+  known to bite.
 
 ### Verified
 
@@ -46,6 +53,12 @@ defects that verification turned up.
   distance 1.494–1.666 AU (Mars is 1.381–1.666 AU), title
   "Mars Orbit (Heliocentric)", animation starts and stops without disturbing
   the plot.
+- Earth↔Mars link over the same window: one-way light time 5.64–17.09 min
+  (round trip 11.28–34.18 min), range 0.678–2.055 AU. The shortest travel
+  time lands on 2027-Feb-18, which is the February 2027 Mars opposition —
+  the curve finds it unaided. The reported light time matches range / c to
+  better than 1e-6 minutes at every sample, which checks the parse and the
+  physics at once.
 
 ## 2026-07-14
 
@@ -53,4 +66,4 @@ defects that verification turned up.
 - Progress checkpoint: useful for deep-space / Solar System Internet routing narratives and mission geometry intuition alongside DTN work.
 - Next: optional ephemeris query polish and screenshot assets for presentations when needed.
 
-_Updated 2026-09-26 09:19 UTC_
+_Updated 2026-09-26 09:26 UTC_

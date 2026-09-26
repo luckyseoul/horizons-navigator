@@ -21,6 +21,8 @@ import threading
 import time
 import unittest
 
+import tkinter as tk
+
 import numpy as np
 
 import horizons_ui
@@ -51,6 +53,31 @@ $$SOE
 2461314.500000000, A.D. 2026-Oct-01 00:00:00.0000, 1.272603245715422E-01, 1.552781205446242E+00, 2.942016831701569E-02, -1.341669120657371E-02, 2.331553317528713E-03, 3.778401905247213E-04,
 $$EOE
 """
+
+# A trimmed OBSERVER reply in the CSV layout used for link timing.
+LINK_CSV = """\
+***********************************************************************************************
+ Date__(UT)__HR:MN, , ,            delta,     deldot,  1-way_down_LT,       VmagSn,     VmagOb,
+***********************************************************************************************
+$$SOE
+ 2026-Sep-26 00:00, , , 1.69933032252892,-11.4546799,    14.13289934,   29.6901475, 32.5118381,
+ 2026-Sep-28 00:00, , , 1.68600676490452,-11.6126242,   14.02209069,   29.7071702, 32.1666973,
+$$EOE
+***********************************************************************************************
+"""
+
+# The same row with the columns shuffled, to prove the positions come from
+# the header rather than from a hard-coded layout.
+LINK_CSV_REORDERED = """\
+ Date__(UT)__HR:MN,     deldot,       VmagSn,  1-way_down_LT,            delta,     VmagOb,
+$$SOE
+ 2026-Sep-26 00:00,-11.4546799,   29.6901475,    14.13289934, 1.69933032252892, 32.5118381,
+$$EOE
+"""
+
+# Constants Horizons itself reports in the reply header.
+AU_KM = 149597870.700
+C_KMS = 299792.458
 
 
 class TestVectorParsing(unittest.TestCase):
@@ -168,12 +195,37 @@ class TestValidation(unittest.TestCase):
             {"COMMAND": "Apophis;", "CENTER": "500@10", "MAKE_EPHEM": "NO"}))
 
 
+class TestLinkTiming(unittest.TestCase):
+    def test_rows_are_parsed(self):
+        rows = HorizonsUI._parse_link_times(LINK_CSV)
+        self.assertEqual(len(rows), 2)
+        date, range_au, light_min = rows[0]
+        self.assertEqual(date, "2026-Sep-26 00:00")
+        self.assertAlmostEqual(range_au, 1.69933032252892)
+        self.assertAlmostEqual(light_min, 14.13289934)
+
+    def test_light_time_equals_range_over_c(self):
+        """The reported light time must be range / c - a real physics check."""
+        for _, range_au, light_min in HorizonsUI._parse_link_times(LINK_CSV):
+            expected = range_au * AU_KM / C_KMS / 60.0
+            self.assertAlmostEqual(light_min, expected, delta=0.001)
+
+    def test_columns_are_found_by_header_not_position(self):
+        rows = HorizonsUI._parse_link_times(LINK_CSV_REORDERED)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0][1], 1.69933032252892)   # delta
+        self.assertAlmostEqual(rows[0][2], 14.13289934)        # 1-way_down_LT
+
+    def test_reply_without_link_columns(self):
+        self.assertIsNone(HorizonsUI._parse_link_times("no header here"))
+        self.assertIsNone(HorizonsUI._parse_link_times(LABELLED))
+
+
 class TestApplication(unittest.TestCase):
     """Drives the real Tk application.  Skipped when there is no display."""
 
     @classmethod
     def setUpClass(cls):
-        import tkinter as tk
         try:
             cls.root = tk.Tk()
         except tk.TclError as exc:  # no DISPLAY / no X server
@@ -243,6 +295,26 @@ class TestApplication(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(seen.get("thread"), threading.main_thread())
 
+    def test_link_tab_and_chart(self):
+        tabs = [self.app.view_tabs.tab(i, "text")
+                for i in range(self.app.view_tabs.index("end"))]
+        self.assertEqual(tabs, ["3D Orbit", "DTN Link Timing"])
+
+    def test_link_summary_renders_and_charts(self):
+        self.app._show_link_summary("Earth", "Mars", {"result": LINK_CSV})
+        text = self.app.output_text.get(1.0, tk.END)
+        self.assertIn("DTN link timing: Earth <-> Mars", text)
+        self.assertIn("One-way light time", text)
+        self.assertIn("2026-Sep-26 00:00", text)
+        self.assertEqual(self.app.view_tabs.select(), str(self.app.link_tab))
+        self.assertEqual(len(self.app.link_plotter.ax.get_lines()), 1)
+        self.assertIn("Earth <-> Mars", self.app.link_plotter.ax.get_title())
+
+    def test_link_summary_handles_a_reply_without_timing(self):
+        self.app._show_link_summary("Earth", "Mars", {"result": "nope"})
+        self.assertEqual(self.app.status_var.get(),
+                         "No range/light-time columns in the reply")
+
 
 @unittest.skipUnless(os.environ.get("HORIZONS_LIVE") == "1",
                      "set HORIZONS_LIVE=1 to query the JPL service")
@@ -260,6 +332,23 @@ class TestLiveAPI(unittest.TestCase):
         distance = np.sqrt(x ** 2 + y ** 2 + z ** 2)
         self.assertTrue(1.3 < float(np.mean(distance)) < 1.8,
                         f"Mars mean heliocentric distance {np.mean(distance):.3f} AU")
+
+    def test_earth_mars_light_time_round_trip(self):
+        api = HorizonsAPI()
+        result = api.query({
+            "COMMAND": "399", "CENTER": "500@499",
+            "START_TIME": "2026-09-26", "STOP_TIME": "2026-12-26",
+            "STEP_SIZE": "10 d", "EPHEM_TYPE": "OBSERVER",
+            "QUANTITIES": "20,21,22", "CSV_FORMAT": "YES",
+            "OBJ_DATA": "NO", "MAKE_EPHEM": "YES"})
+        rows = HorizonsUI._parse_link_times(result["result"])
+        self.assertGreater(len(rows), 5)
+        for _, range_au, light_min in rows:
+            self.assertAlmostEqual(light_min, range_au * AU_KM / C_KMS / 60.0,
+                                   delta=0.01)
+        mean = float(np.mean([row[2] for row in rows]))
+        self.assertTrue(3.0 < mean < 25.0,
+                        f"Earth-Mars mean light time {mean:.2f} min")
 
 
 if __name__ == "__main__":

@@ -451,6 +451,76 @@ class OrbitPlotter:
         self.anim_speed = max(1, min(10, int(speed)))
 
 
+class LinkPlotter:
+    """2D travel-time chart for a DTN link."""
+
+    def __init__(self, parent_frame):
+        self.frame = parent_frame
+        self.fig = plt.Figure(figsize=(6, 4), dpi=100, facecolor='#1e1e1e')
+        self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        toolbar_frame = ttk.Frame(parent_frame)
+        toolbar_frame.pack(fill=tk.X)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        self.toolbar.update()
+
+        self.show_placeholder()
+
+    def _style_axes(self):
+        """Apply dark theme to the 2D axes"""
+        self.ax.set_facecolor('#1e1e1e')
+        self.ax.tick_params(colors='#888888')
+        for spine in self.ax.spines.values():
+            spine.set_color('#444444')
+        self.ax.grid(True, color='#333333', linewidth=0.5)
+        self.ax.set_ylabel('One-way light time (minutes)', color='#aaaaaa')
+
+    def show_placeholder(self, message="Pick two nodes, then compute the link"):
+        """Draw an empty state message"""
+        self.ax.cla()
+        self._style_axes()
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        self.ax.text(0.5, 0.5, message, color='#777777', ha='center',
+                     va='center', transform=self.ax.transAxes)
+        self.canvas.draw()
+
+    def plot_travel_time(self, dates, one_way_minutes, label):
+        """Plot one-way light time in minutes against the sample dates"""
+        self.ax.cla()
+        self._style_axes()
+
+        light = np.asarray(one_way_minutes, dtype=float)
+        x = np.arange(len(light))
+
+        self.ax.plot(x, light, color='#00ff88', linewidth=2, label=label)
+        self.ax.fill_between(x, light, light.min() * 0.98,
+                             color='#00ff88', alpha=0.12)
+
+        best, worst = int(np.argmin(light)), int(np.argmax(light))
+        self.ax.scatter([best], [light[best]], c='#66ccff', s=60, zorder=5,
+                        label=f"best {light[best]:.2f} min")
+        self.ax.scatter([worst], [light[worst]], c='#ff6666', s=60, zorder=5,
+                        label=f"worst {light[worst]:.2f} min")
+
+        # Label a few sample dates instead of building a full date axis.
+        ticks = sorted({0, len(light) - 1, best, worst, len(light) // 2})
+        self.ax.set_xticks(ticks)
+        self.ax.set_xticklabels([dates[i] for i in ticks], rotation=30,
+                                ha='right', fontsize=8)
+
+        self.ax.set_title(f"Bundle travel time: {label}", color='#ffffff',
+                          fontsize=11, pad=10)
+        self.ax.legend(loc='upper right', facecolor='#2e2e2e',
+                       edgecolor='#444444', labelcolor='#ffffff', fontsize=8)
+        self.fig.tight_layout()
+        self.canvas.draw()
+
+
 class HorizonsUI:
     """Main application UI"""
     
@@ -480,9 +550,17 @@ class HorizonsUI:
         self.left_frame = ttk.Frame(self.paned)
         self.paned.add(self.left_frame, weight=1)
         
-        # Right panel: 3D view
-        self.right_frame = ttk.LabelFrame(self.paned, text="3D Orbit View", padding=5)
+        # Right panel: the 3D orbit view and the DTN link timing view
+        self.right_frame = ttk.Frame(self.paned)
         self.paned.add(self.right_frame, weight=1)
+        
+        self.view_tabs = ttk.Notebook(self.right_frame)
+        self.view_tabs.pack(fill=tk.BOTH, expand=True)
+        
+        self.orbit_tab = ttk.Frame(self.view_tabs, padding=5)
+        self.link_tab = ttk.Frame(self.view_tabs, padding=5)
+        self.view_tabs.add(self.orbit_tab, text="3D Orbit")
+        self.view_tabs.add(self.link_tab, text="DTN Link Timing")
         
         # Setup left panel
         self.left_frame.columnconfigure(0, weight=1)
@@ -491,8 +569,9 @@ class HorizonsUI:
         self._create_controls()
         self._create_output()
         
-        # Setup 3D plotter
-        self.plotter = OrbitPlotter(self.right_frame)
+        # Setup the two views
+        self.plotter = OrbitPlotter(self.orbit_tab)
+        self.link_plotter = LinkPlotter(self.link_tab)
         self._init_plot()
         
         # Set defaults
@@ -696,6 +775,30 @@ class HorizonsUI:
         ttk.Label(anim_frame, textvariable=self.frame_var, foreground="gray").pack(side="left", padx=15)
         row += 1
         
+        # === DTN link timing ===
+        ttk.Separator(control_frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=5, sticky="ew", pady=8)
+        row += 1
+        
+        link_frame = ttk.LabelFrame(control_frame, text="DTN Link Timing", padding=5)
+        link_frame.grid(row=row, column=0, columnspan=5, sticky="ew", pady=5)
+        
+        ttk.Label(link_frame, text="Node A:").pack(side="left", padx=(5, 2))
+        self.link_a_var = tk.StringVar()
+        link_a_combo = ttk.Combobox(link_frame, textvariable=self.link_a_var, width=10)
+        link_a_combo["values"] = list(HorizonsAPI.MAJOR_BODIES.keys())
+        link_a_combo.pack(side="left", padx=2)
+        
+        ttk.Label(link_frame, text="Node B:").pack(side="left", padx=(10, 2))
+        self.link_b_var = tk.StringVar()
+        link_b_combo = ttk.Combobox(link_frame, textvariable=self.link_b_var, width=10)
+        link_b_combo["values"] = list(HorizonsAPI.MAJOR_BODIES.keys())
+        link_b_combo.pack(side="left", padx=2)
+        
+        ttk.Button(link_frame, text="Bundle Travel Time",
+                   command=self._compute_link).pack(side="left", padx=10)
+        row += 1
+        
         # Status
         status_frame = ttk.Frame(control_frame)
         status_frame.grid(row=row, column=0, columnspan=5, pady=5)
@@ -735,6 +838,8 @@ class HorizonsUI:
         self.preset_var.set("Mars")
         self.command_var.set("499")
         self.quantities_entry_var.set("1,9,20,23")
+        self.link_a_var.set("Earth")
+        self.link_b_var.set("Mars")
     
     def _on_preset_select(self, event=None):
         name = self.preset_var.get()
@@ -978,6 +1083,136 @@ class HorizonsUI:
         self.plotter.finalize(title)
         
         self.status_var.set(f"Plotted {len(x)} points")
+    
+    @staticmethod
+    def _parse_link_times(result_text: str):
+        """Read range and one-way light time out of an OBSERVER reply.
+
+        Column positions come from the CSV header, so the parse does not
+        depend on the order the quantities were requested in.  Returns a
+        list of ``(date, range_au, one_way_minutes)`` rows, or ``None``.
+        """
+        header = None
+        for line in result_text.splitlines():
+            fields = [field.strip() for field in line.split(',')]
+            if 'delta' in fields and '1-way_down_LT' in fields:
+                header = fields
+                break
+        if header is None:
+            return None
+        
+        range_col = header.index('delta')
+        light_col = header.index('1-way_down_LT')
+        
+        block = re.search(r'\$\$SOE\s*(.*?)\s*\$\$EOE', result_text, re.DOTALL)
+        if not block:
+            return None
+        
+        rows = []
+        for line in block.group(1).splitlines():
+            fields = [field.strip() for field in line.split(',')]
+            if len(fields) <= max(range_col, light_col):
+                continue
+            try:
+                range_au = float(fields[range_col])
+                light_min = float(fields[light_col])
+            except ValueError:
+                continue
+            rows.append((fields[0], range_au, light_min))
+        return rows or None
+    
+    def _compute_link(self):
+        """Query the light time between the two chosen link nodes."""
+        name_a = self.link_a_var.get().strip()
+        name_b = self.link_b_var.get().strip()
+        code_a = HorizonsAPI.MAJOR_BODIES.get(name_a)
+        code_b = HorizonsAPI.MAJOR_BODIES.get(name_b)
+        
+        if not code_a or not code_b:
+            messagebox.showwarning("Input Required",
+                                   "Pick both link nodes from the preset lists.")
+            return
+        if code_a == code_b:
+            messagebox.showwarning("Input Required",
+                                   "Pick two different nodes for a link.")
+            return
+        
+        # Range (20) and one-way down-leg light time (21) are what a bundle
+        # actually has to cross; CSV keeps the column layout parseable.
+        params = {
+            "COMMAND": code_a,
+            "CENTER": f"500@{code_b}",
+            "START_TIME": self.start_var.get().strip(),
+            "STOP_TIME": self.stop_var.get().strip(),
+            "STEP_SIZE": self.step_var.get().strip(),
+            "EPHEM_TYPE": "OBSERVER",
+            "QUANTITIES": "20,21,22",
+            "CSV_FORMAT": "YES",
+            "OBJ_DATA": "NO",
+            "MAKE_EPHEM": "YES",
+        }
+        
+        problem = self._validate_inputs(params)
+        if problem:
+            messagebox.showwarning("Input Required", problem)
+            return
+        
+        self.status_var.set(f"Computing {name_a} <-> {name_b} link...")
+        self.root.update()
+        
+        def do_link():
+            try:
+                result = self.api.query(params)
+                self._post(lambda: self._show_link_summary(name_a, name_b, result))
+            except Exception as e:
+                error_msg = str(e) if str(e) else traceback.format_exc()
+                self._post(lambda msg=error_msg: self._show_error(msg))
+        
+        Thread(target=do_link, daemon=True).start()
+    
+    def _show_link_summary(self, name_a, name_b, result):
+        """Render the travel-time summary and chart for one link query."""
+        rows = self._parse_link_times(result.get("result", ""))
+        if not rows:
+            self.status_var.set("No range/light-time columns in the reply")
+            self.link_plotter.show_placeholder("No link timing in that reply")
+            self.view_tabs.select(self.link_tab)
+            return
+        
+        dates = [row[0] for row in rows]
+        ranges = np.array([row[1] for row in rows])
+        light = np.array([row[2] for row in rows])
+        
+        best = int(np.argmin(light))
+        worst = int(np.argmax(light))
+        
+        lines = [
+            f"DTN link timing: {name_a} <-> {name_b}",
+            "",
+            f"Window             : {dates[0]} to {dates[-1]}  ({len(rows)} samples)",
+            f"One-way light time : {light.min():.2f} min best / "
+            f"{light.mean():.2f} min mean / {light.max():.2f} min worst",
+            f"Round-trip time    : {2 * light.min():.2f} to {2 * light.max():.2f} min",
+            f"Range              : {ranges.min():.3f} to {ranges.max():.3f} AU",
+            "",
+            f"Shortest travel time : {dates[best]} at {light[best]:.2f} min "
+            f"({ranges[best]:.3f} AU)",
+            f"Longest travel time  : {dates[worst]} at {light[worst]:.2f} min "
+            f"({ranges[worst]:.3f} AU)",
+            "",
+            "One-way light time is the propagation floor for a bundle on this",
+            "link. Store-and-forward hops, queuing and retransmission are not",
+            "included, so a delivered bundle takes at least this long.",
+            "",
+        ]
+        
+        self.output_text.delete(1.0, tk.END)
+        self.output_text.insert(tk.END, "\n".join(lines))
+        
+        self.link_plotter.plot_travel_time(dates, light, f"{name_a} <-> {name_b}")
+        self.view_tabs.select(self.link_tab)
+        self.status_var.set(f"Link {name_a} <-> {name_b}: "
+                            f"{light.min():.2f}-{light.max():.2f} min one way")
     
     def _show_error(self, error: str):
         """Display error message"""
